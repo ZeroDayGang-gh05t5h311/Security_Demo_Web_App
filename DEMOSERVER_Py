@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+# server.py
+"""
+Lightweight HTTP server (no Flask) for demo frontends.
+- Serves static files from current directory.
+- Provides API endpoints under /api/*
+  - /api/create_user    POST {"username": "..."}
+  - /api/search_user    POST {"username": "..."}
+  - /api/post_comment   POST {"comment": "..."}
+  - /api/<anything>     POST arbitrary JSON -> echoed back (escaped) and optionally stored in kv table
+Uses sqlite3 with parameterized queries. Safe for local/demo use(may need some modifications depending on your OS/browser setup, etc.
+"""
+import http.server
+import socketserver
+import sqlite3
+import json
+import html
+import os
+import urllib
+from urllib.parse import urlparse
+import threading
+
+PORT = 8080
+DB_PATH = "example.db"
+MAX_BODY = 10 * 1024 * 1024  # 10MB limit
+
+# ---------- DB helpers ----------
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE
+      );
+    """)
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        comment TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    """)
+    # Generic kv store (optional) for arbitrary API data
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS kv (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT,
+        value TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    """)
+    conn.commit()
+    conn.close()
+
+def get_db_conn():
+    # new connection per thread/request; sqlite3 is file-based
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# ---------- Utilities ----------
+def html_escape(s):
+    if s is None:
+        return ""
+    return html.escape(str(s), quote=True).replace("'", "&#39;")
+
+def is_valid_username(u):
+    return isinstance(u, str) and 0 < len(u.strip()) <= 100
+
+def read_json_body(rfile, length):
+    if length is None or length <= 0:
+        return None
+    if length > MAX_BODY:
+        raise ValueError("Body too large")
+    raw = rfile.read(length)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw.decode('utf-8'))
+    except Exception:
+        return None
+
+# ---------- HTTP Handler ----------
+class DemoHandler(http.server.SimpleHTTPRequestHandler):
+    server_version = "DemoHTTP/0.1"
+
+    # Attach CORS and security headers to every response
+    def _set_common_headers(self):
+        # CORS - permissive for local demo. In production limit origins.
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # Basic security headers (adjust as needed)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        # CSP: restrictive for demo; allow same origin connection back to server
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; script-src 'self'; connect-src 'self' http://localhost:%d; style-src 'self'; img-src 'self' data:;" % PORT)
+
+    # Handle CORS preflight
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._set_common_headers()
+        self.end_headers()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        # Read JSON body (content-length required for POST)
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except Exception:
+            length = 0
+
+        try:
+            data = read_json_body(self.rfile, length)
+        except ValueError:
+            self.send_response(413)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "request entity too large"}).encode())
+            return
+
+        # Dispatch known endpoints
+        if path == "/api/create_user":
+            self._handle_create_user(data)
+        elif path == "/api/search_user":
+            self._handle_search_user(data)
+        elif path == "/api/post_comment":
+            self._handle_post_comment(data)
+        elif path.startswith("/api/"):
+            # Generic fallback
+            self._handle_api_fallback(path, data)
+        else:
+            # Not found
+            self.send_response(404)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "not found"}).encode())
+
+    def _handle_create_user(self, data):
+        username = ""
+        if isinstance(data, dict):
+            username = (data.get("username") or "").strip()
+        if not is_valid_username(username):
+            self.send_response(400)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "invalid username"}).encode())
+            return
+
+        conn = get_db_conn()
+        try:
+            cur = conn.cursor()
+            # parameterized insert
+            cur.execute("INSERT OR IGNORE INTO users (username) VALUES (?);", (username,))
+            conn.commit()
+        except Exception as e:
+            conn.close()
+            self.send_response(500)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "db error"}).encode())
+            return
+        conn.close()
+
+        self.send_response(200)
+        self._set_common_headers()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"success": True, "username": username}).encode())
+
+    def _handle_search_user(self, data):
+        username = ""
+        if isinstance(data, dict):
+            username = (data.get("username") or "").strip()
+        if not is_valid_username(username):
+            self.send_response(400)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "invalid username"}).encode())
+            return
+
+        conn = get_db_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id, username FROM users WHERE username = ? LIMIT 1;", (username,))
+            row = cur.fetchone()
+        except Exception as e:
+            conn.close()
+            self.send_response(500)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "db error"}).encode())
+            return
+
+        conn.close()
+        if row:
+            out = {"found": True, "id": row[0], "username": row[1]}
+        else:
+            out = {"found": False}
+
+        self.send_response(200)
+        self._set_common_headers()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(out).encode())
+
+    def _handle_post_comment(self, data):
+        comment = ""
+        if isinstance(data, dict):
+            comment = data.get("comment") or ""
+        if not isinstance(comment, str):
+            self.send_response(400)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "invalid comment"}).encode())
+            return
+        if len(comment) > 5000:
+            self.send_response(400)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "comment too long"}).encode())
+            return
+
+        conn = get_db_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO comments (comment) VALUES (?);", (comment,))
+            conn.commit()
+        except Exception as e:
+            conn.close()
+            self.send_response(500)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "db error"}).encode())
+            return
+        conn.close()
+
+        safe = html_escape(comment)
+        self.send_response(200)
+        self._set_common_headers()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"safe_comment": safe}).encode())
+
+    def _handle_api_fallback(self, path, data):
+        """
+        Generic fallback for arbitrary POSTs under /api/*:
+        - echoes back JSON with values HTML-escaped
+        - if payload contains {"_persist": "<key>"} it will store the rest under kv table
+        """
+        # Build escaped echo
+        echo = {}
+        if isinstance(data, dict):
+            for k, v in data.items():
+                # skip internal directive from echo
+                if k == "_persist":
+                    continue
+                echo[k] = html_escape(v)
+        else:
+            # Non-dict payloads: stringify and escape
+            echo["value"] = html_escape(data)
+
+        # optional persistence
+        persist_key = None
+        if isinstance(data, dict) and data.get("_persist"):
+            persist_key = str(data.get("_persist"))
+
+        if persist_key:
+            try:
+                conn = get_db_conn()
+                cur = conn.cursor()
+                cur.execute("INSERT INTO kv (key, value) VALUES (?, ?);", (persist_key, json.dumps(data)))
+                conn.commit()
+                conn.close()
+                echo["_persisted"] = True
+                echo["_persist_key"] = persist_key
+            except Exception:
+                echo["_persisted"] = False
+
+        self.send_response(200)
+        self._set_common_headers()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(echo).encode())
+
+    # Override send_head to ensure directory index and file serving works (SimpleHTTPRequestHandler handles this)
+    # We only need to ensure we add our security headers when serving files.
+    def send_response(self, code, message=None):
+        # call base but don't finalize headers here
+        super().send_response(code, message)
+
+    def end_headers(self):
+        # Add CORS / security headers to static file responses too
+        # This is called when headers are about to be finished
+        # Note: `_set_common_headers` uses send_header which is fine here
+        self._set_common_headers()
+        super().end_headers()
+
+# ---------- Server entry ----------
+def run_server():
+    init_db()
+    handler = DemoHandler
+    # Use ThreadingTCPServer for concurrent handling
+    with socketserver.ThreadingTCPServer(("", PORT), handler) as httpd:
+        sa = httpd.socket.getsockname()
+        print(f"Serving HTTP on {sa[0]} port {sa[1]} (http://localhost:{PORT}/) ...")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nShutting down server.")
+            httpd.shutdown()
+
+if __name__ == "__main__":
+    run_server()
