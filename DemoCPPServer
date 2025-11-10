@@ -1,0 +1,475 @@
+// server.cpp
+// Minimal threaded HTTP server (POSIX sockets) + sqlite3 for demo purposes.
+// Build: g++ server.cpp -std=c++17 -pthread -lsqlite3 -o server
+// Run: ./server
+// Notes: POSIX-only (Linux/macOS). Windows would require Winsock initialization and adjustments.
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <cstring>
+#include <ctime>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <mutex>
+#include <regex>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+#include <sqlite3.h>
+const int PORT = 8080;
+const int BACKLOG = 10;
+const size_t MAX_BODY = 10 * 1024 * 1024; // 10 MB
+const char* DB_PATH = "example.db";
+std::mutex sqlite_mutex;
+// ---------- Utilities ----------
+static std::string now_string() {
+    std::time_t t = std::time(nullptr);
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "%c", std::localtime(&t));
+    return std::string(buf);
+}
+
+static std::string html_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '"': out += "&quot;"; break;
+            case '\'': out += "&#39;"; break;
+            default: out += (char)c;
+        }
+    }
+    return out;
+}
+
+// Very small JSON string extractor: looks for "key": "value" (basic, good enough for demo).
+static bool json_get_string(const std::string& body, const std::string& key, std::string& out) {
+    // Regex: "key"\s*:\s*"([^"\\]*(\\.[^"\\]*)*)"
+    std::string pattern = "\""+ std::regex_replace(key, std::regex(R"([-[\]{}()*+?.,\\^$|#\s])"), "\\$&") +"\"\\s*:\\s*\"([^\"]*)\"";
+    std::regex re(pattern);
+    std::smatch m;
+    if (std::regex_search(body, m, re) && m.size() >= 2) {
+        out = m[1].str();
+        return true;
+    }
+    return false;
+}
+
+// Parse Content-Length header
+static long parse_content_length(const std::map<std::string, std::string>& headers) {
+    auto it = headers.find("content-length");
+    if (it == headers.end()) return 0;
+    try {
+        return std::stol(it->second);
+    } catch (...) { return 0; }
+}
+
+// Read a file into string, return true on success
+static bool read_file(const std::string& path, std::string& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+static std::string content_type_for_path(const std::string& p) {
+    if (p.size() >= 5 && p.substr(p.size()-5) == ".html") return "text/html; charset=utf-8";
+    if (p.size() >= 4 && p.substr(p.size()-4) == ".css") return "text/css";
+    if (p.size() >= 3 && p.substr(p.size()-3) == ".js") return "application/javascript";
+    if (p.size() >= 4 && (p.substr(p.size()-4) == ".png")) return "image/png";
+    if (p.size() >= 4 && (p.substr(p.size()-4) == ".jpg" || p.substr(p.size()-5) == ".jpeg")) return "image/jpeg";
+    return "application/octet-stream";
+}
+
+// ---------- SQLite initialization ----------
+static bool init_db() {
+    sqlite3* db = nullptr;
+    if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) {
+        std::cerr << "Cannot open DB: " << sqlite3_errmsg(db) << "\n";
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    const char* sql = 
+        "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE);"
+        "CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY AUTOINCREMENT, comment TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);"
+        "CREATE TABLE IF NOT EXISTS kv (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, value TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);";
+    char* err = nullptr;
+    if (sqlite3_exec(db, sql, 0, 0, &err) != SQLITE_OK) {
+        std::cerr << "DB init error: " << (err ? err : "unknown") << "\n";
+        if (err) sqlite3_free(err);
+        sqlite3_close(db);
+        return false;
+    }
+    sqlite3_close(db);
+    return true;
+}
+
+// Thread-safe helper to run parameterized SQL without return
+static bool sqlite_exec_param(const char* sql, const std::vector<std::string>& params) {
+    std::lock_guard<std::mutex> lk(sqlite_mutex);
+    sqlite3* db = nullptr;
+    if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return false;
+    }
+    for (size_t i = 0; i < params.size(); ++i) {
+        sqlite3_bind_text(stmt, (int)i+1, params[i].c_str(), -1, SQLITE_TRANSIENT);
+    }
+    int rc = sqlite3_step(stmt);
+    bool ok = (rc == SQLITE_DONE || rc == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return ok;
+}
+
+// Thread-safe helper to get a single row (id, username)
+static bool sqlite_get_user(const std::string& username, int& out_id, std::string& out_username) {
+    std::lock_guard<std::mutex> lk(sqlite_mutex);
+    sqlite3* db = nullptr;
+    if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    const char* sql = "SELECT id, username FROM users WHERE username = ? LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return false;
+    }
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        out_id = sqlite3_column_int(stmt, 0);
+        const unsigned char* txt = sqlite3_column_text(stmt, 1);
+        out_username = txt ? reinterpret_cast<const char*>(txt) : "";
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return true;
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return false;
+}
+
+// ---------- HTTP handling ----------
+struct HttpRequest {
+    std::string method;
+    std::string path;
+    std::string version;
+    std::map<std::string, std::string> headers;
+    std::string body;
+};
+
+static std::string to_lower(const std::string& s) {
+    std::string r = s;
+    for (char &c : r) c = std::tolower((unsigned char)c);
+    return r;
+}
+
+static bool read_line(int fd, std::string& out) {
+    out.clear();
+    char c;
+    ssize_t n;
+    while ((n = recv(fd, &c, 1, 0)) == 1) {
+        if (c == '\r') {
+            // peek for \n
+            recv(fd, &c, 1, MSG_PEEK);
+            // consume \n if present
+            if (c == '\n') recv(fd, &c, 1, 0);
+            return true;
+        }
+        if (c == '\n') return true;
+        out.push_back(c);
+        if (out.size() > 16 * 1024) return false; // too long
+    }
+    return n == 0 ? !out.empty() : false;
+}
+
+static bool recv_all(int fd, char* buf, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t r = recv(fd, buf + off, len - off, 0);
+        if (r <= 0) return false;
+        off += (size_t)r;
+    }
+    return true;
+}
+
+static bool parse_request(int client, HttpRequest& req) {
+    std::string line;
+    if (!read_line(client, line)) return false;
+    // Request line: METHOD PATH VERSION
+    std::istringstream rl(line);
+    if (!(rl >> req.method >> req.path >> req.version)) return false;
+
+    // Read headers
+    while (true) {
+        if (!read_line(client, line)) return false;
+        if (line.empty()) break;
+        size_t pos = line.find(':');
+        if (pos == std::string::npos) continue;
+        std::string name = to_lower(line.substr(0, pos));
+        std::string val = line.substr(pos + 1);
+        // trim spaces
+        size_t start = val.find_first_not_of(" \t");
+        if (start != std::string::npos) val = val.substr(start);
+        size_t end = val.find_last_not_of(" \t");
+        if (end != std::string::npos) val = val.substr(0, end+1);
+        req.headers[name] = val;
+    }
+
+    long content_len = parse_content_length(req.headers);
+    if (content_len > 0) {
+        if ((size_t)content_len > MAX_BODY) return false;
+        req.body.resize(content_len);
+        if (!recv_all(client, &req.body[0], content_len)) return false;
+    }
+    return true;
+}
+
+static void send_response(int client, int status, const std::string& status_text,
+                          const std::map<std::string,std::string>& headers, const std::string& body) {
+    std::ostringstream ss;
+    ss << "HTTP/1.1 " << status << " " << status_text << "\r\n";
+    for (const auto& h : headers) ss << h.first << ": " << h.second << "\r\n";
+    ss << "Content-Length: " << body.size() << "\r\n";
+    ss << "\r\n";
+    std::string header_str = ss.str();
+    send(client, header_str.data(), header_str.size(), 0);
+    if (!body.empty()) send(client, body.data(), body.size(), 0);
+}
+
+static std::map<std::string,std::string> common_headers(const std::string& content_type) {
+    std::map<std::string,std::string> h;
+    h["Content-Type"] = content_type;
+    h["Access-Control-Allow-Origin"] = "*";
+    h["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
+    h["Access-Control-Allow-Headers"] = "Content-Type";
+    h["X-Content-Type-Options"] = "nosniff";
+    h["X-Frame-Options"] = "DENY";
+    h["Referrer-Policy"] = "no-referrer";
+    std::ostringstream csp;
+    csp << "default-src 'none'; script-src 'self'; connect-src 'self' http://localhost:" << PORT
+        << "; style-src 'self'; img-src 'self' data:;";
+    h["Content-Security-Policy"] = csp.str();
+    return h;
+}
+
+static void handle_client(int client) {
+    HttpRequest req;
+    if (!parse_request(client, req)) {
+        close(client);
+        return;
+    }
+
+    // Handle OPTIONS quickly
+    if (req.method == "OPTIONS") {
+        auto headers = common_headers("text/plain");
+        send_response(client, 204, "No Content", headers, "");
+        close(client);
+        return;
+    }
+    // Serve static files for GET /
+    if (req.method == "GET") {
+        std::string path = req.path;
+        if (path == "/") path = "/index.html";
+        // strip leading '/'
+        if (path.size() && path[0] == '/') path = path.substr(1);
+        std::string body;
+        if (read_file(path, body)) {
+            auto headers = common_headers(content_type_for_path(path));
+            send_response(client, 200, "OK", headers, body);
+        } else {
+            std::string msg = "{\"error\":\"not found\"}";
+            auto headers = common_headers("application/json");
+            send_response(client, 404, "Not Found", headers, msg);
+        }
+        close(client);
+        return;
+    }
+    // Only POST endpoints below
+    if (req.method != "POST") {
+        auto headers = common_headers("application/json");
+        send_response(client, 405, "Method Not Allowed", headers, "{\"error\":\"method not allowed\"}");
+        close(client);
+        return;
+    }
+    // Ensure body is JSON-like (quick check)
+    std::string body = req.body;
+    // endpoints
+    if (req.path == "/api/create_user") {
+        std::string username;
+        if (!json_get_string(body, "username", username) || username.empty() || username.size() > 100) {
+            auto headers = common_headers("application/json");
+            send_response(client, 400, "Bad Request", headers, "{\"error\":\"invalid username\"}");
+            close(client);
+            return;
+        }
+        // Insert with parameter
+        const char* sql = "INSERT OR IGNORE INTO users (username) VALUES (?);";
+        bool ok = sqlite_exec_param(sql, {username});
+        if (!ok) {
+            auto headers = common_headers("application/json");
+            send_response(client, 500, "Server Error", headers, "{\"error\":\"db error\"}");
+            close(client);
+            return;
+        }
+        std::ostringstream out;
+        out << "{\"success\":true,\"username\":\"" << html_escape(username) << "\"}";
+        auto headers = common_headers("application/json");
+        send_response(client, 200, "OK", headers, out.str());
+        close(client);
+        return;
+    } else if (req.path == "/api/search_user") {
+        std::string username;
+        if (!json_get_string(body, "username", username) || username.empty() || username.size() > 100) {
+            auto headers = common_headers("application/json");
+            send_response(client, 400, "Bad Request", headers, "{\"error\":\"invalid username\"}");
+            close(client);
+            return;
+        }
+        int id;
+        std::string found_username;
+        bool found = sqlite_get_user(username, id, found_username);
+        auto headers = common_headers("application/json");
+        if (found) {
+            std::ostringstream out;
+            out << "{\"found\":true,\"id\":" << id << ",\"username\":\"" << html_escape(found_username) << "\"}";
+            send_response(client, 200, "OK", headers, out.str());
+        } else {
+            send_response(client, 200, "OK", headers, "{\"found\":false}");
+        }
+        close(client);
+        return;
+    } else if (req.path == "/api/post_comment") {
+        std::string comment;
+        if (!json_get_string(body, "comment", comment)) comment = "";
+        if (comment.size() > 5000) {
+            auto headers = common_headers("application/json");
+            send_response(client, 400, "Bad Request", headers, "{\"error\":\"comment too long\"}");
+            close(client);
+            return;
+        }
+        const char* sql = "INSERT INTO comments (comment) VALUES (?);";
+        bool ok = sqlite_exec_param(sql, {comment});
+        if (!ok) {
+            auto headers = common_headers("application/json");
+            send_response(client, 500, "Server Error", headers, "{\"error\":\"db error\"}");
+            close(client);
+            return;
+        }
+        std::ostringstream out;
+        out << "{\"safe_comment\":\"" << html_escape(comment) << "\"}";
+        auto headers = common_headers("application/json");
+        send_response(client, 200, "OK", headers, out.str());
+        close(client);
+        return;
+    } else if (req.path.rfind("/api/", 0) == 0) {
+        // generic fallback: echo JSON keys with HTML-escaped values
+        // naive parse: find all "key":"value" pairs
+        std::map<std::string,std::string> echo;
+        std::regex pair_re("\"([^\"]+)\"\\s*:\\s*\"([^\"]*)\"");
+        auto begin = std::sregex_iterator(body.begin(), body.end(), pair_re);
+        auto end = std::sregex_iterator();
+        std::string persist_key;
+        for (auto it = begin; it != end; ++it) {
+            std::smatch m = *it;
+            if (m.size() >= 3) {
+                std::string k = m[1].str();
+                std::string v = m[2].str();
+                if (k == "_persist") persist_key = v;
+                else echo[k] = html_escape(v);
+            }
+        }
+        bool persisted = false;
+        if (!persist_key.empty()) {
+            // store the raw body under kv
+            std::string sql = "INSERT INTO kv (key, value) VALUES (? , ?);";
+            // we store the original body as a param
+            persisted = sqlite_exec_param(sql.c_str(), {persist_key, body});
+        }
+        std::ostringstream out;
+        out << "{";
+        bool first = true;
+        for (auto &kv : echo) {
+            if (!first) out << ",";
+            out << "\"" << kv.first << "\":\"" << kv.second << "\"";
+            first = false;
+        }
+        if (!first) out << ",";
+        out << "\"_persisted\":" << (persisted ? "true" : "false");
+        out << "}";
+        auto headers = common_headers("application/json");
+        send_response(client, 200, "OK", headers, out.str());
+        close(client);
+        return;
+    } else {
+        auto headers = common_headers("application/json");
+        send_response(client, 404, "Not Found", headers, "{\"error\":\"not found\"}");
+        close(client);
+        return;
+    }
+}
+// ---------- Server loop ----------
+int main() {
+    std::cout << "Starting server (C++ demo) at http://0.0.0.0:" << PORT << " ...\n";
+    if (!init_db()) {
+        std::cerr << "DB initialization failed.\n";
+        return 1;
+    }
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        return 1;
+    }
+    int opt = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(sockfd);
+        return 1;
+    }
+    if (listen(sockfd, BACKLOG) < 0) {
+        perror("listen");
+        close(sockfd);
+        return 1;
+    }
+    // Accept loop
+    while (true) {
+        sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client = accept(sockfd, (struct sockaddr*)&client_addr, &client_len);
+        if (client < 0) {
+            perror("accept");
+            continue;
+        }
+        // spawn thread
+        std::thread t([client]() {
+            handle_client(client);
+        });
+        t.detach();
+    }
+    close(sockfd);
+    return 0;
+}
