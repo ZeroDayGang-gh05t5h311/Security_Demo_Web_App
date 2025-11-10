@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>SQLi and XSS LAB</title>
+</head>
+<style>
+  :root {
+    --bg: #000;
+    --accent: #00ff66;
+    --muted: #0f0f0f;
+    --card: #07120a;
+    --text: #dfffe6;
+  }
+  html,body { 
+    height:100%; 
+    margin:0; 
+    font-family: Inter,Segoe UI,Arial; 
+    background:linear-gradient(180deg,#000,#001100); 
+    color:var(--text); 
+  }
+  .wrap { 
+    max-width:1000px; 
+    margin:28px auto; 
+    padding:20px; 
+  }
+  h1 { 
+    color:var(--accent); 
+    margin:0 0 12px 0; 
+  }
+  .grid { 
+    display:grid; 
+    grid-template-columns:1fr 1fr; gap:18px; 
+  }
+  .card { 
+    background:var(--card); 
+    border:1px solid #013814; 
+    padding:16px; 
+    border-radius:8px; box-shadow: 0 6px 18px rgba(0,255,102,0.04); 
+  }
+  label { 
+    display:block; 
+    font-size:13px; color:#bfffcf; 
+    margin-bottom:6px; 
+  }
+  input[type="text"], textarea { width:100%; 
+    padding:10px; 
+    border-radius:6px; 
+    border:1px solid #02361f; 
+    background:#07120a; 
+    color:var(--text); 
+  }
+  button { background:transparent; 
+    color:var(--accent); 
+    border:1px solid #025a2f; 
+    padding:8px 12px; 
+    border-radius:6px; 
+    cursor:pointer; }
+  pre { 
+    background:var(--muted); 
+    padding:10px; 
+    border-radius:6px; 
+    overflow:auto; 
+    color:#aaffc9; 
+  }
+  .muted { 
+    font-size:13px; 
+    color:#9fe6b9; 
+    margin-top:8px; 
+  }
+  .result { 
+    margin-top:10px; 
+    padding:10px; 
+    border-radius:6px; 
+    background:#001a0f; 
+    border:1px solid #01381f; 
+  }
+  .fullwidth { grid-column: 1 / -1; }
+  @media (max-width:800px) { .grid { grid-template-columns: 1fr; } .fullwidth{grid-column:auto;} }
+</style>
+<body>
+<div class="wrap">
+  <h1>Security Demo</h1>
+  <p class="muted">Educational demo: shows *how* SQL injection and XSS can arise and, importantly, how to do it safely. <strong>Do not deploy the "unsafe examples" to production.</strong></p>
+  <div class="grid">
+    <!-- SQL Section -->
+    <div class="card">
+      <h3 style="color:var(--accent); margin-top:0">SQL Demo (conceptual)</h3>
+      <label for="username">Username to search</label>
+      <input id="username" type="text" placeholder="e.g. alice" />
+      <div style="margin-top:10px;">
+        <button id="btnBuild">Show constructed query (simulated)</button>
+        <button id="btnSearch">Send safe request to server</button>
+      </div>
+      <div class="result" id="sqlResult" aria-live="polite" style="margin-top:12px;">
+        <strong>Constructed SQL string (simulated):</strong>
+        <pre id="constructedSql">(no query built yet)</pre>
+        <strong>Server response (safe, parameterized):</strong>
+        <pre id="serverResp">(no server response yet)</pre>
+      </div>
+      <p class="muted">Note: The "constructed query" is shown as a string for illustration and is <em>not</em> executed by the client. The client sends user input to the server via JSON; the server uses parameterized queries.</p>
+    </div>
+    <!-- XSS Section -->
+    <div class="card">
+      <h3 style="color:var(--accent); margin-top:0">XSS Demo (conceptual)</h3>
+      <label for="comment">Comment (any text)</label>
+      <textarea id="comment" rows="4" placeholder="Type a comment..."></textarea>
+      <div style="margin-top:10px">
+        <button id="btnPreview">Show how an <em>unsafe</em> HTML string would look (simulated)</button>
+        <button id="btnPost">Send comment to server (server escapes it)</button>
+      </div>
+      <div class="result">
+        <strong>Simulated unsafe HTML string (for illustration only):</strong>
+        <pre id="unsafeHtml">(nothing yet)</pre>
+        <strong>Server-escaped comment (safe to show):</strong>
+        <pre id="escapedComment">(no comment)</pre>
+      </div>
+      <p class="muted">Important: The demo never inserts untrusted HTML into the DOM. It shows a string that <em>could</em> be dangerous if injected raw. Always escape or sanitize on both client & server.</p>
+    </div>
+    <!-- Full width: tips -->
+    <div class="card fullwidth">
+      <h3 style="color:var(--accent); margin-top:0">Quick Security Tips</h3>
+      <ul>
+        <li>Always use parameterized queries (prepared statements) instead of concatenating values into SQL strings.</li>
+        <li>Escape or sanitize user input before inserting into HTML. Prefer setting textContent over innerHTML.</li>
+        <li>Use server-side validation and escaping as a last line of defense.</li>
+        <li>Run tests in an isolated environment; never expose intentionally vulnerable endpoints publicly.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+<script>
+/*
+  Client configured to work with your C++ backend:
+  - Default backend base URL: http://localhost:8080
+  - Endpoints:
+    POST /api/search_user  -> { "username": "..." }  returns JSON
+    POST /api/post_comment -> { "comment": "..." }   returns { "safe_comment": "..." }
+*/
+
+// Change this if your server runs on a different host/port
+const BACKEND_BASE = 'http://localhost:8080';
+
+const constructedSqlEl = document.getElementById('constructedSql');
+const serverRespEl = document.getElementById('serverResp');
+const unsafeHtmlEl = document.getElementById('unsafeHtml');
+const escapedCommentEl = document.getElementById('escapedComment');
+
+document.getElementById('btnBuild').addEventListener('click', () => {
+  const u = document.getElementById('username').value;
+  // Simulated unsafe construction (string shown only, not executed):
+  const simulated = "SELECT * FROM users WHERE username = '" + u + "';";
+  constructedSqlEl.textContent = simulated || '(empty input)';
+});
+
+document.getElementById('btnSearch').addEventListener('click', async () => {
+  const u = document.getElementById('username').value;
+  serverRespEl.textContent = 'Loading...';
+  try {
+    const r = await fetch(BACKEND_BASE + '/api/search_user', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({username: u})
+    });
+    if (!r.ok) {
+      serverRespEl.textContent = 'Server error: ' + r.status + ' ' + r.statusText;
+      return;
+    }
+    const j = await r.json();
+    // Display the JSON nicely
+    serverRespEl.textContent = JSON.stringify(j, null, 2);
+  } catch (e) {
+    serverRespEl.textContent = 'Error: ' + e.message;
+  }
+});
+
+document.getElementById('btnPreview').addEventListener('click', () => {
+  const c = document.getElementById('comment').value;
+  // Show a string that demonstrates how raw HTML might appear.
+  // NOTE: we do NOT insert this string into innerHTML anywhere.
+  const example = "<script>...dangerous script here...<\\/script> " + c;
+  unsafeHtmlEl.textContent = example || '(empty)';
+});
+
+document.getElementById('btnPost').addEventListener('click', async () => {
+  const c = document.getElementById('comment').value;
+  escapedCommentEl.textContent = 'Posting...';
+  try {
+    const r = await fetch(BACKEND_BASE + '/api/post_comment', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({comment: c})
+    });
+    if (!r.ok) {
+      escapedCommentEl.textContent = 'Server error: ' + r.status + ' ' + r.statusText;
+      return;
+    }
+    const j = await r.json();
+    // Display the safe comment from server (already escaped by server)
+    escapedCommentEl.textContent = j.safe_comment || '(empty)';
+    // If you wanted to render safely into the DOM, do:
+    // someContainer.textContent = j.safe_comment;
+  } catch (e) {
+    escapedCommentEl.textContent = 'Error: ' + e.message;
+  }
+});
+</script>
+</body>
+</html>
