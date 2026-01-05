@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>SQLi and XSS LAB</title>
 </head>
 <style>
@@ -12,7 +12,7 @@
     --card: #07120a;
     --text: #dfffe6;
   }
-  html,body { 
+  html, body { 
     height:100%; 
     margin:0; 
     font-family: Inter,Segoe UI,Arial; 
@@ -44,8 +44,8 @@
     margin-bottom:6px; 
   }
   input[type="text"], textarea { width:100%; 
-    padding:10px; 
-    border-radius:6px; 
+    padding:3.5px; 
+    border-radius:4px; 
     border:1px solid #02361f; 
     background:#07120a; 
     color:var(--text); 
@@ -87,7 +87,7 @@
     <div class="card">
       <h3 style="color:var(--accent); margin-top:0">SQL Demo (conceptual)</h3>
       <label for="username">Username to search</label>
-      <input id="username" type="text" placeholder="e.g. alice" />
+      <input id="username" type="text" placeholder="e.g. alice"/>
       <div style="margin-top:10px;">
         <button id="btnBuild">Show constructed query (simulated)</button>
         <button id="btnSearch">Send safe request to server</button>
@@ -137,22 +137,18 @@
     POST /api/search_user  -> { "username": "..." }  returns JSON
     POST /api/post_comment -> { "comment": "..." }   returns { "safe_comment": "..." }
 */
-
 // Change this if your server runs on a different host/port
 const BACKEND_BASE = 'http://localhost:8080';
-
 const constructedSqlEl = document.getElementById('constructedSql');
 const serverRespEl = document.getElementById('serverResp');
 const unsafeHtmlEl = document.getElementById('unsafeHtml');
 const escapedCommentEl = document.getElementById('escapedComment');
-
 document.getElementById('btnBuild').addEventListener('click', () => {
   const u = document.getElementById('username').value;
   // Simulated unsafe construction (string shown only, not executed):
   const simulated = "SELECT * FROM users WHERE username = '" + u + "';";
   constructedSqlEl.textContent = simulated || '(empty input)';
 });
-
 document.getElementById('btnSearch').addEventListener('click', async () => {
   const u = document.getElementById('username').value;
   serverRespEl.textContent = 'Loading...';
@@ -167,21 +163,19 @@ document.getElementById('btnSearch').addEventListener('click', async () => {
       return;
     }
     const j = await r.json();
-    // Display the JSON nicely
+    // Display the JSON nicely0
     serverRespEl.textContent = JSON.stringify(j, null, 2);
   } catch (e) {
     serverRespEl.textContent = 'Error: ' + e.message;
   }
 });
-
 document.getElementById('btnPreview').addEventListener('click', () => {
   const c = document.getElementById('comment').value;
   // Show a string that demonstrates how raw HTML might appear.
-  // NOTE: we do NOT insert this string into innerHTML anywhere.
+  // NOTE: we do NOT insert this string into innerHTML anywhere
   const example = "<script>...dangerous script here...<\\/script> " + c;
   unsafeHtmlEl.textContent = example || '(empty)';
 });
-
 document.getElementById('btnPost').addEventListener('click', async () => {
   const c = document.getElementById('comment').value;
   escapedCommentEl.textContent = 'Posting...';
