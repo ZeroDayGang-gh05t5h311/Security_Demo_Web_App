@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>SQLi and XSS LAB</title>
 </head>
 <style>
@@ -17,7 +18,7 @@
     margin:0; 
     font-family: Inter,Segoe UI,Arial; 
     background:linear-gradient(180deg,#000,#001100); 
-    color:var(--text); 
+    color:var(--te`xt); 
   }
   .wrap { 
     max-width:1000px; 
@@ -43,7 +44,7 @@
     font-size:13px; color:#bfffcf; 
     margin-bottom:6px; 
   }
-  input[type="text"], textarea { width:100%; 
+  input[type="text"], input[type="password"], textarea { width:100%; 
     padding:3.5px; 
     border-radius:4px; 
     border:1px solid #02361f; 
@@ -117,6 +118,19 @@
       </div>
       <p class="muted">Important: The demo never inserts untrusted HTML into the DOM. It shows a string that <em>could</em> be dangerous if injected raw. Always escape or sanitize on both client & server.</p>
     </div>
+    <!-- UserStore Section -->
+    <div class="card">
+      <h3 style="color:var(--accent); margin-top:0">User Store</h3>
+      <label for="usernameInput">Username</label>
+      <input id="usernameInput" type="text" placeholder="Enter username">
+      <label for="passwordInput">Password</label>
+      <input id="passwordInput" type="password" placeholder="Enter password">
+      <button onclick="addUserFromForm()">Add User</button>
+      <h4>Users List:</h4>
+      <ul id="userList">
+        <!-- Users will be displayed here -->
+      </ul>
+    </div>
   </div>
 </div>
 <script>
@@ -125,11 +139,97 @@
   const serverRespEl = document.getElementById('serverResp');
   const unsafeHtmlEl = document.getElementById('unsafeHtml');
   const escapedCommentEl = document.getElementById('escapedComment');
+  const _username = document.getElementById("usernameInput");
+  const _password = document.getElementById("passwordInput");
+
+  // UserStore class
+  class UserStore {
+    constructor() {
+      this.users = []; // Array to store user objects
+    }
+
+    // Function to generate a random ID (pid)
+    generateRandomPid() {
+      return Math.floor(Math.random() * 1000000); // Generates a random number for pid
+    }
+
+    // Function to add a user
+    addUser(username, password) {
+      const pid = this.generateRandomPid(); // Generate a random pid
+      const user = {
+        username,
+        password,
+        pid
+      };
+      this.users.push(user); // Add the user to the array 
+    }
+
+    // Function to get all users
+    getAllUsers() {
+      return this.users;
+    }
+  }
+
+  // Instantiate the UserStore
+  const userStore = new UserStore();
+
+  // Function to update the HTML with current users
+  function displayUsers() {
+    const userList = document.getElementById('userList');
+    userList.innerHTML = ''; // Clear the current list
+    // Get all users and display them
+    userStore.getAllUsers().forEach(user => {
+      const listItem = document.createElement('li');
+      listItem.textContent = `Username: ${user.username}, Password: ${user.password}, PID: ${user.pid}`;
+      userList.appendChild(listItem);
+    });
+  }
+
+  // Function to handle adding a user from the form
+  async function addUserFromForm() {
+    const usernameInput = document.getElementById('usernameInput').value;
+    const passwordInput = document.getElementById('passwordInput').value;
+
+    if (usernameInput && passwordInput) {
+      // Send the username and password to the server
+      try {
+        const response = await fetch(BACKEND_BASE + '/api/create_user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: usernameInput, password: passwordInput })
+        });
+
+        if (!response.ok) {
+          alert('Error creating user: ' + response.statusText);
+          return;
+        }
+
+        const data = await response.json();
+        if (data.success) {
+          userStore.addUser(usernameInput, passwordInput); // Add user to the front-end store
+          displayUsers(); // Update the display of users
+        } else {
+          alert('Failed to create user');
+        }
+      } catch (error) {
+        alert('Error: ' + error.message);
+      }
+
+      // Clear the input fields
+      document.getElementById('usernameInput').value = '';
+      document.getElementById('passwordInput').value = '';
+    } else {
+      alert('Please fill in both username and password!');
+    }
+  }
+
+  // Existing SQL Injection and XSS related code (no change)
   document.getElementById('btnBuild').addEventListener('click', () => {
     const u = document.getElementById('username').value;
     const simulated = "SELECT * FROM users WHERE username = '" + u + "';";
     constructedSqlEl.textContent = simulated || '(empty input)';
   });
+
   document.getElementById('btnSearch').addEventListener('click', async () => {
     const u = document.getElementById('username').value;
     serverRespEl.textContent = 'Loading...';
@@ -137,7 +237,7 @@
       const r = await fetch(BACKEND_BASE + '/api/search_user', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({username: u})
+        body: JSON.stringify({username:u})
       });
       if (!r.ok) {
         serverRespEl.textContent = 'Server error: ' + r.status + ' ' + r.statusText;
@@ -149,11 +249,13 @@
       serverRespEl.textContent = 'Error: ' + e.message;
     }
   });
+
   document.getElementById('btnPreview').addEventListener('click', () => {
     const c = document.getElementById('comment').value;
     const example = "<script>...dangerous script here...<\\/script> " + c;
     unsafeHtmlEl.textContent = example || '(empty)';
   });
+
   document.getElementById('btnPost').addEventListener('click', async () => {
     const c = document.getElementById('comment').value;
     escapedCommentEl.textContent = 'Posting...';
