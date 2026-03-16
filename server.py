@@ -7,51 +7,32 @@ Lightweight HTTP server (no Flask) for demo frontends.
   - /api/search_user    POST {"username": "..."}
   - /api/post_comment   POST {"comment": "..."}
   - /api/ingest_users   POST {"users": [{"username": "user1"}, {"username": "user2"}]}
-Uses sqlite3 with parameterized queries. Safe for local/demo use.
 """
 import http.server
 import socketserver
-import sqlite3
 import json
 import html
 import os
 import urllib
 from urllib.parse import urlparse
 PORT = 8080
-DB_PATH = "example.db"
 MAX_BODY = 10 * 1024 * 1024  # 10MB limit
-# ---------- DB helpers ----------
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT NOT NULL UNIQUE
-      );
-    """)
-    cur.execute("""
-      CREATE TABLE IF NOT EXISTS comments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        comment TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    """)
-    # Generic kv store (optional) for arbitrary API data
-    cur.execute("""
-      CREATE TABLE IF NOT EXISTS kv (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        key TEXT,
-        value TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    """)
-    conn.commit()
-    conn.close()
-def get_db_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+def genPID():
+    seedone = Math.floor(Math.random() * 1000)
+    seedtwo = Math.floor(Math.random() * 1000)
+    seedthree = Math.floor(Math.random() * 1000)  # Generates a random number for pid
+    final_seed = seedone + seedtwo + seedthree
+    return final_seed
+# _______________________________
+"""
+class db:
+    count = 0
+    usernames = []
+    passwords = []
+    upid = []
+    def addUser(self):
+"""
+# ^^^ DB STORE ^^^
 # ---------- Utilities ----------
 def html_escape(s):
     if s is None:
@@ -73,7 +54,7 @@ def read_json_body(rfile, length):
         return None
 # ---------- HTTP Handler ----------
 class DemoHandler(http.server.SimpleHTTPRequestHandler):
-    server_version = "DemoHTTP/0.1"
+    server_version = "DemoHTTP/1.1"
     def _set_common_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -88,7 +69,7 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
                          "style-src 'self'; "
                          "img-src 'self' data:;" % PORT)
     def do_OPTIONS(self):
-        self.send_response(204)
+        self.send_response(101)
         self._set_common_headers()
         self.end_headers()
     def do_POST(self):
@@ -105,7 +86,6 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "request entity too large"}).encode())
             return
         # Dispatch known endpoints
         if path == "/api/create_user":
@@ -121,37 +101,31 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "not found"}).encode())
-
     def _handle_create_user(self, data):
         username = data.get("username", "").strip()
+        password = data.get("password", "").strip()
         if not is_valid_username(username):
+            self.send_response(400)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Invalid username"}).encode('utf-8'))
+            return
+        try:
+            db.usernames.append(username)
+            db.passwords.append(password)  # Fixed `password` list name
+            db.upid.append(genPID())  # Storing a mock user ID
             self.send_response(200)
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "invalid username"}).encode())
-            return
-        conn = get_db_conn()
-        try:
-            cur = conn.cursor()
-            cur.execute("INSERT OR IGNORE INTO users (username) VALUES (?);", (username,))
-            conn.commit()
+            self.wfile.write(json.dumps({"success": True}).encode('utf-8'))
         except Exception as e:
-            conn.close()
             self.send_response(503)
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "db error"}).encode())
-            return
-        conn.close()
-        self.send_response(200)
-        self._set_common_headers()
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps({"success": True, "username": username}).encode())
-
+            self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
     def _handle_search_user(self, data):
         username = data.get("username", "").strip()
         if not is_valid_username(username):
@@ -159,31 +133,20 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "invalid username"}).encode())
+            self.wfile.write(json.dumps({"error": "Invalid username"}).encode('utf-8'))
             return
-        conn = get_db_conn()
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT id, username FROM users WHERE username = ? LIMIT 1;", (username,))
-            row = cur.fetchone()
-        except Exception as e:
-            conn.close()
-            self.send_response(500)
-            self._set_common_headers()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "db error"}).encode())
-            return
-        conn.close()
-        if row:
-            out = {"found": True, "id": row[0], "username": row[1]}
+        # Search for the user in the mock database
+        if username in db.usernames:
+            response = {"username": username, "status": "found"}
         else:
-            out = {"found": False}
+            response = {"username": username, "status": "not found"}
+        # Send response with user search result
         self.send_response(200)
         self._set_common_headers()
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps(out).encode())
+        self.wfile.write(json.dumps(response).encode('utf-8'))
+
     def _handle_post_comment(self, data):
         comment = data.get("comment", "").strip()
         if not isinstance(comment, str) or len(comment) > 5000:
@@ -191,35 +154,28 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "invalid or too long comment"}).encode())
+            self.wfile.write(json.dumps({"error": "Invalid comment"}).encode('utf-8'))
             return
-        conn = get_db_conn()
         try:
-            cur = conn.cursor()
-            cur.execute("INSERT INTO comments (comment) VALUES (?);", (comment,))
-            conn.commit()
+            safe_comment = html_escape(comment)  # Escape comment
+            self.send_response(200)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"safe_comment": safe_comment}).encode('utf-8'))
         except Exception as e:
-            conn.close()
             self.send_response(500)
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "db error"}).encode())
-            return
-        conn.close()
-        safe = html_escape(comment)
-        self.send_response(200)
-        self._set_common_headers()
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps({"safe_comment": safe}).encode())
+            self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
     def _handle_ingest_users(self, data):
         if not isinstance(data, dict):
             self.send_response(400)
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "invalid payload"}).encode())
+            self.wfile.write(json.dumps({"error": "Invalid data format"}).encode('utf-8'))
             return
         users = []
         # Accept single user
@@ -235,43 +191,29 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "no valid usernames provided"}).encode())
+            self.wfile.write(json.dumps({"error": "No valid users provided"}).encode('utf-8'))
             return
-        conn = get_db_conn()
         inserted = []
         rejected = []
         try:
-            cur = conn.cursor()
             for username in users:
                 if is_valid_username(username):
-                    cur.execute(
-                        "INSERT OR IGNORE INTO users (username) VALUES (?);",
-                        (username.strip(),)
-                    )
+                    db.usernames.append(username.strip())  # Fixed insertion
                     inserted.append(username.strip())
                 else:
                     rejected.append(username)
-            conn.commit()
-        except Exception:
-            conn.close()
+            self.send_response(200)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"inserted": inserted, "rejected": rejected}).encode('utf-8'))
+        except Exception as e:
             self.send_response(500)
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "db error"}).encode())
-            return
-        conn.close()
-        self.send_response(200)
-        self._set_common_headers()
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps({
-            "success": True,
-            "inserted": inserted,
-            "rejected": rejected
-        }).encode())
+            self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
 def run_server():
-    init_db()
     handler = DemoHandler
     with socketserver.ThreadingTCPServer(("", PORT), handler) as httpd:
         sa = httpd.socket.getsockname()
@@ -281,6 +223,7 @@ def run_server():
         except KeyboardInterrupt:
             print("\nShutting down server.")
             httpd.shutdown()
-
+        finally:
+            print("Shutdown success...bye.")
 if __name__ == "__main__":
     run_server()
