@@ -6,28 +6,22 @@
 #include <thread>
 #include <ctime>
 #include </usr/include/jsoncpp/json/json.h>
-//^^ this will depend on your system setup(I had to list the full path to get this to work(you may have to do something diffrent)
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <cstring>
 #include <mutex>
 #include <algorithm>
-
 using namespace std;
-
 // Define constants
 #define PORT 8080
-#define MAX_BODY 10 * 1024 * 1024
-
+#define MAX_BODY (10 * 1024 * 1024)  // Maximum request body size: 10MB
 // Mock Database
 map<int, string> users;
 map<int, string> comments;
-
 // Mutex for thread-safety
 mutex dbMutex;
-
-// Proper HTML escaping (FIXED)
+// Proper HTML escaping
 string html_escape(const string &s) {
     string out;
     out.reserve(s.size());
@@ -42,61 +36,73 @@ string html_escape(const string &s) {
     }
     return out;
 }
-
 bool is_valid_username(const string &username) {
     return !username.empty() && username.length() <= 100;
 }
-
+// Initialize mock database
 void init_db() {
+    lock_guard<mutex> lock(dbMutex);
     users[1] = "admin";
     comments[1] = "This is a comment!";
 }
-
+// Send HTTP response with error handling
 void send_response(int code, const string &message, int client_sock) {
     string response =
         "HTTP/1.1 " + to_string(code) + " OK\r\n"
         "Content-Type: application/json\r\n"
         "Connection: close\r\n\r\n" +
         message;
-
-    send(client_sock, response.c_str(), response.size(), 0);
+    ssize_t sent = send(client_sock, response.c_str(), response.size(), 0);
+    if (sent < 0) {
+        cerr << "[ERROR] Failed to send response to client socket " << client_sock << endl;
+    }
 }
-
+// Log incoming requests
+void log_request(const string &method, const string &path, const Json::Value &data) {
+    cout << "----------------------------------------" << endl;
+    cout << "[REQUEST] Method: " << method << " | URL: http://localhost:" << PORT << path << endl;
+    if (!data.empty()) {
+        Json::StreamWriterBuilder wbuilder;
+        string prettyData = Json::writeString(wbuilder, data);
+        cout << "[DATA] " << prettyData << endl;
+    }
+    cout << "----------------------------------------" << endl;
+}
+// Handle user creation
 void handle_create_user(const Json::Value &data, int client_sock) {
+    if (!data.isMember("username") || !data.isMember("password")) {
+        send_response(400, "{\"error\":\"missing username or password\"}", client_sock);
+        return;
+    }
     string username = data["username"].asString();
     string password = data["password"].asString();
-
     if (!is_valid_username(username)) {
         send_response(400, "{\"error\":\"invalid username\"}", client_sock);
         return;
     }
-
     lock_guard<mutex> lock(dbMutex);
-
-    int user_id = users.size() + 1;
+    int user_id = users.size() + 1;  // This could be improved by using a separate ID counter
     users[user_id] = username;
-
     Json::Value response;
     response["success"] = true;
     response["username"] = username;
     response["password"] = password;
-
     send_response(200, response.toStyledString(), client_sock);
 }
-
+// Handle user search
 void handle_search_user(const Json::Value &data, int client_sock) {
+    if (!data.isMember("username")) {
+        send_response(400, "{\"error\":\"missing username\"}", client_sock);
+        return;
+    }
     string username = data["username"].asString();
-
     if (!is_valid_username(username)) {
         send_response(400, "{\"error\":\"invalid username\"}", client_sock);
         return;
     }
-
     lock_guard<mutex> lock(dbMutex);
-
     bool found = false;
     int user_id = -1;
-
     for (const auto &u : users) {
         if (u.second == username) {
             found = true;
@@ -104,42 +110,37 @@ void handle_search_user(const Json::Value &data, int client_sock) {
             break;
         }
     }
-
     Json::Value response;
     response["found"] = found;
     if (found) {
         response["id"] = user_id;
         response["username"] = username;
     }
-
     send_response(200, response.toStyledString(), client_sock);
 }
-
+// Handle posting comments
 void handle_post_comment(const Json::Value &data, int client_sock) {
+    if (!data.isMember("comment")) {
+        send_response(400, "{\"error\":\"missing comment\"}", client_sock);
+        return;
+    }
     string comment = data["comment"].asString();
-
     if (comment.empty() || comment.length() > 5000) {
         send_response(400, "{\"error\":\"invalid or too long comment\"}", client_sock);
         return;
     }
-
     lock_guard<mutex> lock(dbMutex);
-
     int comment_id = comments.size() + 1;
     comments[comment_id] = comment;
-
     Json::Value response;
     response["safe_comment"] = html_escape(comment);
-
     send_response(200, response.toStyledString(), client_sock);
 }
-
+// Handle batch ingestion of users
 void handle_ingest_users(const Json::Value &data, int client_sock) {
     vector<string> inserted;
     vector<string> rejected;
-
     lock_guard<mutex> lock(dbMutex);
-
     if (data.isMember("username")) {
         string username = data["username"].asString();
         if (is_valid_username(username)) {
@@ -148,8 +149,9 @@ void handle_ingest_users(const Json::Value &data, int client_sock) {
         } else {
             rejected.push_back(username);
         }
-    } else if (data.isMember("users")) {
+    } else if (data.isMember("users") && data["users"].isArray()) {
         for (const auto &u : data["users"]) {
+            if (!u.isMember("username")) continue;
             string username = u["username"].asString();
             if (is_valid_username(username)) {
                 users[users.size() + 1] = username;
@@ -158,39 +160,40 @@ void handle_ingest_users(const Json::Value &data, int client_sock) {
                 rejected.push_back(username);
             }
         }
+    } else {
+        send_response(400, "{\"error\":\"invalid payload\"}", client_sock);
+        return;
     }
-
     Json::Value response;
     for (const auto &u : inserted) response["inserted"].append(u);
     for (const auto &u : rejected) response["rejected"].append(u);
-
     send_response(200, response.toStyledString(), client_sock);
-}
-
+} 
+// Handle HTTP requests
 void handle_request(int client_sock) {
     char buffer[1024];
     ssize_t received = recv(client_sock, buffer, sizeof(buffer), 0);
-
     if (received <= 0) {
         close(client_sock);
         return;
     }
-
     string request(buffer, received);
     istringstream stream(request);
-
     string method, path;
     stream >> method >> path;
-
     Json::Value data;
     Json::Reader reader;
-
     size_t pos = request.find("\r\n\r\n");
     if (pos != string::npos) {
         string body = request.substr(pos + 4);
-        reader.parse(body, data);
+        if (!reader.parse(body, data)) {
+            send_response(400, "{\"error\":\"invalid JSON\"}", client_sock);
+            close(client_sock);
+            return;
+        }
     }
-
+    // Log every request with full URL and data
+    log_request(method, path, data);
     if (path == "/api/create_user")
         handle_create_user(data, client_sock);
     else if (path == "/api/search_user")
@@ -201,27 +204,45 @@ void handle_request(int client_sock) {
         handle_ingest_users(data, client_sock);
     else
         send_response(404, "{\"error\":\"not found\"}", client_sock);
-
     close(client_sock);
 }
+// Run the server
 void run_server() {
     init_db();
     int server_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_sock < 0) {
+        cerr << "[ERROR] Failed to create socket" << endl;
+        return;
+    }
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(PORT);
-    bind(server_sock, (sockaddr*)&server_addr, sizeof(server_addr));
-    listen(server_sock, 5);
-    cout << "Server running on port " << PORT << "..." << endl;
+    if (bind(server_sock, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        cerr << "[ERROR] Bind failed" << endl;
+        close(server_sock);
+        return;
+    }
+    if (listen(server_sock, 5) < 0) {
+        cerr << "[ERROR] Listen failed" << endl;
+        close(server_sock);
+        return;
+    }
+    cout << "[INFO] Server running on port " << PORT << "..." << endl;
     while (true) {
         int client_sock = accept(server_sock, nullptr, nullptr);
         if (client_sock >= 0) {
             thread(handle_request, client_sock).detach();
+        } else {
+            cerr << "[ERROR] Failed to accept connection" << endl;
         }
     }
 }
 int main() {
     run_server();
     return 0;
-};
+}
+/* curl -X POST -H "Content-Type: application/json" \
+    -d '{"username":"testuser","password":"123"}' \
+    http://localhost:8080/api/create_user */
+// g++ -std=c++17 -pthread -Wall -Wextra -g server.cpp -ljsoncpp -o server && ./server
