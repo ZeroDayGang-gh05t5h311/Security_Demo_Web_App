@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 
 """
 Lightweight HTTP server (no Flask) for demo frontends.
 - Serves static files from current directory.
@@ -9,30 +9,25 @@ Lightweight HTTP server (no Flask) for demo frontends.
   - /api/ingest_users   POST {"users": [{"username": "user1"}, {"username": "user2"}]}
 """
 import http.server
-import socketserver
-import json
-import html
-import os
-import urllib
+import socketserver,html,os,urllib,random,json
 from urllib.parse import urlparse
 PORT = 8080
 MAX_BODY = 10 * 1024 * 1024  # 10MB limit
-def genPID():
-    seedone = Math.floor(Math.random() * 1000)
-    seedtwo = Math.floor(Math.random() * 1000)
-    seedthree = Math.floor(Math.random() * 1000)  # Generates a random number for pid
-    final_seed = seedone + seedtwo + seedthree
-    return final_seed
-# _______________________________
-"""
+# ______________________________
 class db:
-    count = 0
-    usernames = []
-    passwords = []
+    def genPID():
+        seedone = random.randint(1, 1000)
+        seedtwo = random.randint(1, 1000)
+        seedthree = random.randint(1, 1000)  # Generates a random number for pid
+        final_seed = seedone + seedtwo + seedthree
+        return final_seed
+    usernames = ["Addison", "Charli", "Loren", "Admin"]
+    passwords = ["A44150n!", "Ch7rl1", "L0r3n", "A4m1n"]
     upid = []
-    def addUser(self):
-"""
-# ^^^ DB STORE ^^^
+# Initializing `upid` list with random user IDs
+db.upid.append(db.genPID())
+db.upid.append(db.genPID())
+# ^^^ DB STORE ^^^^
 # ---------- Utilities ----------
 def html_escape(s):
     if s is None:
@@ -104,6 +99,7 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_create_user(self, data):
         username = data.get("username", "").strip()
         password = data.get("password", "").strip()
+        # Check if the username is valid
         if not is_valid_username(username):
             self.send_response(400)
             self._set_common_headers()
@@ -111,10 +107,19 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"error": "Invalid username"}).encode('utf-8'))
             return
+        # Check if the username already exists
+        if username in db.usernames:
+            self.send_response(400)
+            self._set_common_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Username already exists"}).encode('utf-8'))
+            return
+        # Add username and password to the mock database
         try:
             db.usernames.append(username)
-            db.passwords.append(password)  # Fixed `password` list name
-            db.upid.append(genPID())  # Storing a mock user ID
+            db.passwords.append(password)
+            db.upid.append(db.genPID())  # Storing a mock user ID
             self.send_response(200)
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
@@ -146,7 +151,6 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(response).encode('utf-8'))
-
     def _handle_post_comment(self, data):
         comment = data.get("comment", "").strip()
         if not isinstance(comment, str) or len(comment) > 5000:
@@ -185,7 +189,7 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
         elif "users" in data and isinstance(data["users"], list):
             for u in data["users"]:
                 if isinstance(u, dict) and "username" in u:
-                    users.append(u["username"])
+                    db.usernames.append(u["username"])
         if not users:
             self.send_response(400)
             self._set_common_headers()
@@ -197,8 +201,10 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
         rejected = []
         try:
             for username in users:
-                if is_valid_username(username):
-                    db.usernames.append(username.strip())  # Fixed insertion
+                if username in db.usernames:
+                    rejected.append(username)  # Skip if the username already exists
+                elif is_valid_username(username):
+                    db.usernames.append(username.strip())
                     inserted.append(username.strip())
                 else:
                     rejected.append(username)
@@ -223,7 +229,5 @@ def run_server():
         except KeyboardInterrupt:
             print("\nShutting down server.")
             httpd.shutdown()
-        finally:
-            print("Shutdown success...bye.")
 if __name__ == "__main__":
     run_server()
