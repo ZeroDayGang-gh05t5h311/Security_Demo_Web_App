@@ -1,34 +1,24 @@
 #!/usr/bin/python3 
-"""
-Lightweight HTTP server (no Flask) for demo frontends.
-- Serves static files from current directory.
-- Provides API endpoints under /api/*
-  - /api/create_user    POST {"username": "..."}
-  - /api/search_user    POST {"username": "..."}
-  - /api/post_comment   POST {"comment": "..."}
-  - /api/ingest_users   POST {"users": [{"username": "user1"}, {"username": "user2"}]}
-"""
 import http.server
 import socketserver,html,os,urllib,random,json
 from urllib.parse import urlparse
 PORT = 8080
 MAX_BODY = 10 * 1024 * 1024  # 10MB limit
-# ______________________________
 class db:
     def genPID():
         seedone = random.randint(1, 1000)
         seedtwo = random.randint(1, 1000)
-        seedthree = random.randint(1, 1000)  # Generates a random number for pid
+        seedthree = random.randint(1, 1000) 
         final_seed = seedone + seedtwo + seedthree
         return final_seed
     usernames = ["Addison", "Charli", "Loren", "Admin"]
     passwords = ["A44150n!", "Ch7rl1", "L0r3n", "A4m1n"]
     upid = []
-# Initializing `upid` list with random user IDs
-db.upid.append(db.genPID())
-db.upid.append(db.genPID())
-# ^^^ DB STORE ^^^^
-# ---------- Utilities ----------
+    def init_db():
+        if db.upid == []:
+            for each in db.usernames:
+                db.upid.append(db.genPID())
+db.init_db()
 def html_escape(s):
     if s is None:
         return ""
@@ -47,7 +37,6 @@ def read_json_body(rfile, length):
         return json.loads(raw.decode('utf-8'))
     except Exception:
         return None
-# ---------- HTTP Handler ----------
 class DemoHandler(http.server.SimpleHTTPRequestHandler):
     server_version = "DemoHTTP/1.1"
     def _set_common_headers(self):
@@ -82,7 +71,6 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             return
-        # Dispatch known endpoints
         if path == "/api/create_user":
             self._handle_create_user(data)
         elif path == "/api/search_user":
@@ -107,7 +95,6 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"error": "Invalid username"}).encode('utf-8'))
             return
-        # Check if the username already exists
         if username in db.usernames:
             self.send_response(400)
             self._set_common_headers()
@@ -115,11 +102,10 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"error": "Username already exists"}).encode('utf-8'))
             return
-        # Add username and password to the mock database
         try:
             db.usernames.append(username)
             db.passwords.append(password)
-            db.upid.append(db.genPID())  # Storing a mock user ID
+            db.upid.append(db.genPID())  
             self.send_response(200)
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
@@ -140,18 +126,17 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"error": "Invalid username"}).encode('utf-8'))
             return
-        # Search for the user in the mock database
         if username in db.usernames:
             response = {"username": username, "status": "found"}
         else:
             response = {"username": username, "status": "not found"}
-        # Send response with user search result
         self.send_response(200)
         self._set_common_headers()
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(response).encode('utf-8'))
     def _handle_post_comment(self, data):
+        """Handles posting a comment, ensuring it is sanitized for XSS."""
         comment = data.get("comment", "").strip()
         if not isinstance(comment, str) or len(comment) > 5000:
             self.send_response(400)
@@ -161,7 +146,7 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Invalid comment"}).encode('utf-8'))
             return
         try:
-            safe_comment = html_escape(comment)  # Escape comment
+            safe_comment = html_escape(comment)  # Escape comment to prevent XSS
             self.send_response(200)
             self._set_common_headers()
             self.send_header("Content-Type", "application/json")
@@ -182,10 +167,8 @@ class DemoHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Invalid data format"}).encode('utf-8'))
             return
         users = []
-        # Accept single user
         if "username" in data:
             users.append(data.get("username"))
-        # Accept bulk users
         elif "users" in data and isinstance(data["users"], list):
             for u in data["users"]:
                 if isinstance(u, dict) and "username" in u:
