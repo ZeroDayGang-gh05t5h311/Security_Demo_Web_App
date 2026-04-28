@@ -1,87 +1,88 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>SQLi and XSS LAB</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>SQLi and XSS LAB</title>
+  <style>
+    :root {
+      --bg: #000;
+      --accent: #00ff66;
+      --muted: #0f0f0f;
+      --card: #07120a;
+      --text: #dfffe6;
+    }
+    html, body { 
+      height:100%; 
+      margin:0; 
+      font-family: Inter,Segoe UI,Arial; 
+      background:linear-gradient(180deg,#000,#001100); 
+      color:var(--text); 
+    }
+    .wrap { 
+      max-width:1000px; 
+      margin:28px auto; 
+      padding:20px; 
+    }
+    h1 { 
+      color:var(--accent); 
+      margin:0 0 12px 0; 
+    }
+    .grid { 
+      display:grid; 
+      grid-template-columns:1fr 1fr; gap:18px; 
+    }
+    .card { 
+      background:var(--card); 
+      border:1px solid #013814; 
+      padding:16px; 
+      border-radius:8px; box-shadow: 0 6px 18px rgba(0,255,102,0.04); 
+    }
+    label { 
+      display:block; 
+      font-size:13px; color:#bfffcf; 
+      margin-bottom:6px; 
+    }
+    input[type="text"], input[type="password"], textarea { width:100%; 
+      padding:3.5px; 
+      border-radius:4px; 
+      border:1px solid #02361f; 
+      background:#07120a; 
+      color:var(--text); 
+    }
+    button { background:transparent; 
+      color:var(--accent); 
+      border:1px solid #025a2f; 
+      padding:8px 12px; 
+      border-radius:6px; 
+      cursor:pointer; }
+    pre { 
+      background:var(--muted); 
+      padding:10px; 
+      border-radius:6px; 
+      overflow:auto; 
+      color:#aaffc9; 
+    }
+    .muted { 
+      font-size:13px; 
+      color:#9fe6b9; 
+      margin-top:8px; 
+    }
+    .result { 
+      margin-top:10px; 
+      padding:10px; 
+      border-radius:6px; 
+      background:#001a0f; 
+      border:1px solid #01381f; 
+    }
+    .fullwidth { grid-column: 1 / -1; }
+    @media (max-width:800px) { .grid { grid-template-columns: 1fr; } .fullwidth{grid-column:auto;} }
+  </style>
 </head>
-<style>
-  :root {
-    --bg: #000;
-    --accent: #00ff66;
-    --muted: #0f0f0f;
-    --card: #07120a;
-    --text: #dfffe6;
-  }
-  html, body { 
-    height:100%; 
-    margin:0; 
-    font-family: Inter,Segoe UI,Arial; 
-    background:linear-gradient(180deg,#000,#001100); 
-    color:var(--text); 
-  }
-  .wrap { 
-    max-width:1000px; 
-    margin:28px auto; 
-    padding:20px; 
-  }
-  h1 { 
-    color:var(--accent); 
-    margin:0 0 12px 0; 
-  }
-  .grid { 
-    display:grid; 
-    grid-template-columns:1fr 1fr; gap:18px; 
-  }
-  .card { 
-    background:var(--card); 
-    border:1px solid #013814; 
-    padding:16px; 
-    border-radius:8px; box-shadow: 0 6px 18px rgba(0,255,102,0.04); 
-  }
-  label { 
-    display:block; 
-    font-size:13px; color:#bfffcf; 
-    margin-bottom:6px; 
-  }
-  input[type="text"], input[type="password"], textarea { width:100%; 
-    padding:3.5px; 
-    border-radius:4px; 
-    border:1px solid #02361f; 
-    background:#07120a; 
-    color:var(--text); 
-  }
-  button { background:transparent; 
-    color:var(--accent); 
-    border:1px solid #025a2f; 
-    padding:8px 12px; 
-    border-radius:6px; 
-    cursor:pointer; }
-  pre { 
-    background:var(--muted); 
-    padding:10px; 
-    border-radius:6px; 
-    overflow:auto; 
-    color:#aaffc9; 
-  }
-  .muted { 
-    font-size:13px; 
-    color:#9fe6b9; 
-    margin-top:8px; 
-  }
-  .result { 
-    margin-top:10px; 
-    padding:10px; 
-    border-radius:6px; 
-    background:#001a0f; 
-    border:1px solid #01381f; 
-  }
-  .fullwidth { grid-column: 1 / -1; }
-  @media (max-width:800px) { .grid { grid-template-columns: 1fr; } .fullwidth{grid-column:auto;} }
-</style>
 <body>
 <div class="wrap">
   <h1>Security Demo</h1>
+  <button id="btnLogout" style="background: var(--accent); color: #000; padding: 8px 12px; border-radius: 6px; cursor: pointer; margin-bottom: 16px;">Log Out</button>
   <p class="muted">Educational demo: shows *how* SQL injection and XSS can arise and, importantly, how to do it safely. <strong>Do not deploy the "unsafe examples" to production.</strong></p>
   <div class="grid">
     <!-- SQL Section -->
@@ -134,7 +135,7 @@
   </div>
 </div>
 <script>
-"use strict";
+  "use strict";
   const BACKEND_BASE = 'http://localhost:8080';
   const constructedSqlEl = document.getElementById('constructedSql');
   const serverRespEl = document.getElementById('serverResp');
@@ -142,13 +143,7 @@
   const escapedCommentEl = document.getElementById('escapedComment');
   const _username = document.getElementById("usernameInput");
   const _password = document.getElementById("passwordInput");
-  // Function to generate a random PID
-  function genPID() {
-    const seedone = Math.floor(Math.random() * 1000);
-    const seedtwo = Math.floor(Math.random() * 1000);
-    const seedthree = Math.floor(Math.random() * 1000);
-    return seedone + seedtwo + seedthree;
-  }
+
   // Function to handle adding a user from the form
   async function addUserFromForm() {
     const usernameInput = document.getElementById('usernameInput').value;
@@ -160,8 +155,13 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username: usernameInput, password: passwordInput })
         });
-        const data = await response.json(); // Ensure we get a success message
-        window.alert('Username:'+usernameInput+" is now in the db");
+        const data = await response.json();
+        if (data.success) {
+          window.alert('Username: ' + usernameInput + " is now in the DB.");
+          listUsers();
+        } else {
+          window.alert('Error: ' + data.error);
+        }
       } catch (error) {
         window.alert('Error: ' + error.message);
       }
@@ -171,7 +171,25 @@
       window.alert('Username and password are required');
     }
   }
-  // SQL Injection demo logic
+  async function listUsers() {
+    const userListEl = document.getElementById('userList');
+    userListEl.innerHTML = ''; // Clear existing list
+    try {
+      const response = await fetch(BACKEND_BASE + '/api/ingest_users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ users: [] }) // Empty array for this case
+      });
+      const data = await response.json();
+      data.inserted.forEach(username => {
+        const li = document.createElement('li');
+        li.textContent = username;
+        userListEl.appendChild(li);
+      });
+    } catch (error) {
+      console.error('Error fetching user list:', error);
+    }
+  }
   document.getElementById('btnBuild').addEventListener('click', () => {
     const u = document.getElementById('username').value;
     const simulated = "SELECT * FROM users WHERE username = '" + u + "';";
@@ -196,7 +214,6 @@
       serverRespEl.textContent = 'Error: ' + e.message;
     }
   });
-  // XSS demo logic
   document.getElementById('btnPreview').addEventListener('click', () => {
     const c = document.getElementById('comment').value;
     const example = "<script>...dangerous script here...<\\/script> " + c;
@@ -221,6 +238,14 @@
       escapedCommentEl.textContent = 'Error: ' + e.message;
     }
   });
+  document.getElementById('btnLogout').addEventListener('click', () => {
+    _username.value = '';
+    _password.value = '';
+    alert('Logged out successfully');
+  });
+  // Initial user list load
+  listUsers();
+  /* Dear programmer/user, sorry if you wanted a full SOAP web API, but this is just a demo and I won't lie to you: will be lazy when nobody is paying me to do this(not even in pizza and or energy drinks). Therefor you will need to finish it off if you want to play more with it: or wait until i get bored/very drunk one weekend and just decide to do it(please don't but also if people moan at me that they would like me to do it, it can become priority) */
 </script>
 </body>
 </html>
